@@ -45,6 +45,7 @@ from pyiceberg.transforms import (
     VoidTransform,
     YearTransform,
     parse_transform,
+    CohTransform
 )
 from pyiceberg.typedef import IcebergBaseModel, Record
 from pyiceberg.types import (
@@ -310,6 +311,10 @@ class PartitionSpecVisitor(Generic[T], ABC):
         """Visit unknown partition field."""
         raise ValueError(f"Unknown transform is not supported: {transform}")
 
+    @abstractmethod
+    def coh(self, field_id: int, source_name: str, source_id: int) -> T:
+        """Visit identity partition field."""
+
 
 class _PartitionNameGenerator(PartitionSpecVisitor[str]):
     def identity(self, field_id: int, source_name: str, source_id: int) -> str:
@@ -339,6 +344,9 @@ class _PartitionNameGenerator(PartitionSpecVisitor[str]):
     def unknown(self, field_id: int, source_name: str, source_id: int, transform: str) -> str:
         return super().unknown(field_id, source_name, source_id, transform)
 
+    def coh(self, field_id: int, source_name: str, source_id: int) -> str:
+        return source_name + "_coh"
+
 
 R = TypeVar("R")
 
@@ -355,6 +363,8 @@ def _visit_partition_field(schema: Schema, field: PartitionField, visitor: Parti
 
     transform = field.transform
     if isinstance(transform, IdentityTransform):
+        return visitor.identity(field.field_id, source_name, field.source_id)
+    elif isinstance(transform, CohTransform):
         return visitor.identity(field.field_id, source_name, field.source_id)
     elif isinstance(transform, BucketTransform):
         return visitor.bucket(field.field_id, source_name, field.source_id, transform.num_buckets)

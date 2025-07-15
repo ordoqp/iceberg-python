@@ -62,6 +62,8 @@ from pyiceberg.expressions.literals import (
     LongLiteral,
     TimestampLiteral,
     literal,
+    FloatLiteral,
+    DoubleLiteral
 )
 from pyiceberg.typedef import IcebergRootModel, L
 from pyiceberg.types import (
@@ -99,6 +101,7 @@ YEAR = "year"
 MONTH = "month"
 DAY = "day"
 HOUR = "hour"
+COH = "coh"
 
 BUCKET_PARSER = ParseNumberFromBrackets(BUCKET)
 TRUNCATE_PARSER = ParseNumberFromBrackets(TRUNCATE)
@@ -127,6 +130,8 @@ def parse_transform(v: Any) -> Any:
             return DayTransform()
         elif v == HOUR:
             return HourTransform()
+        elif v == COH:
+            return CohTransform()
         else:
             return UnknownTransform(transform=v)
     return v
@@ -1138,6 +1143,41 @@ def _set_apply_transform(name: str, pred: BoundSetPredicate[L], transform: Calla
     else:
         raise ValueError(f"Unknown BoundSetPredicate: {pred}")
 
+def _compute_coh(
+    name: str, pred: BoundLiteralPredicate[L], transform: Callable[[Optional[L]], Optional[L]]
+) -> Optional[UnboundPredicate[Any]]:
+    boundary = pred.literal
+
+    if not isinstance(boundary, (LongLiteral, DecimalLiteral, FloatLiteral)):
+        raise ValueError(f"Expected a numeric literal, got: {type(boundary)}")
+
+    if isinstance(pred, (BoundLessThan, BoundLessThanOrEqual)):
+        transform_boundary = _transform_literal(transform, boundary)
+        return LessThanOrEqual(Reference(name), transform_boundary.increment())  # type: ignore
+    elif isinstance(pred, (BoundGreaterThan, BoundGreaterThanOrEqual)):
+        return GreaterThanOrEqual(Reference(name), _transform_literal(transform, boundary))  # type: ignore
+    elif isinstance(pred, BoundEqualTo):
+        return EqualTo(Reference(name), _transform_literal(transform, boundary))
+    else:
+        return None
+
+def _compute_coh_strict(
+    name: str, pred: BoundLiteralPredicate[L], transform: Callable[[Optional[L]], Optional[L]]
+) -> Optional[UnboundPredicate[Any]]:
+    boundary = pred.literal
+
+    if not isinstance(boundary, (LongLiteral, DecimalLiteral, FloatLiteral)):
+        raise ValueError(f"Expected a numeric literal, got: {type(boundary)}")
+
+    if isinstance(pred, (BoundLessThan, BoundLessThanOrEqual)):
+        transform_boundary = _transform_literal(transform, boundary)
+        return LessThanOrEqual(Reference(name), transform_boundary.increment())  # type: ignore
+    elif isinstance(pred, (BoundGreaterThan, BoundGreaterThanOrEqual)):
+        return GreaterThanOrEqual(Reference(name), _transform_literal(transform, boundary))  # type: ignore
+    elif isinstance(pred, BoundEqualTo):
+        return EqualTo(Reference(name), _transform_literal(transform, boundary))
+    else:
+        return None
 
 class BoundTransform(BoundTerm[L]):
     """A transform expression."""
@@ -1147,3 +1187,65 @@ class BoundTransform(BoundTerm[L]):
     def __init__(self, term: BoundTerm[L], transform: Transform[L, Any]):
         self.term: BoundTerm[L] = term
         self.transform = transform
+
+class CohTransform(Transform[S, S]):
+    root: LiteralType["coh"] = Field(default="coh")
+
+    def __init__(self) -> None:
+        super().__init__("coh")
+
+    def __str__(self) -> str:
+        """Return the string representation of the IdentityTransform class."""
+        return "coh"
+
+    def __repr__(self) -> str:
+        """Return the string representation of the IdentityTransform class."""
+        return "CohTransform()"
+
+    def transform(self, source: IcebergType) -> Callable[[Optional[S]], Optional[S]]:
+        return lambda v: int(10.0*float(v))
+
+    def result_type(self, source: IcebergType):
+        return IntegerType()
+
+    def can_transform(self, source: IcebergType) -> bool:
+        return source.is_primitive
+
+    def project(self, name: str, pred: BoundPredicate[L]) -> Optional[UnboundPredicate[Any]]:
+        transformer= self.transform(pred.term.ref().field.field_type)
+
+        if isinstance(pred.term, BoundTransform):
+            return _project_transform_predicate(self, name, pred)
+        elif isinstance(pred, BoundUnaryPredicate):
+            return pred.as_unbound(Reference(name))
+        elif isinstance(pred, BoundLiteralPredicate):
+            return _compute_coh(name, pred , transformer)
+        elif isinstance(pred, BoundSetPredicate):
+            return pred.as_unbound(Reference(name), pred.literals)
+        else:
+            return None
+
+    def strict_project(self, name: str, pred: BoundPredicate[Any]) -> Optional[UnboundPredicate[Any]]:
+        transformer= self.transform(pred.term.ref().field.field_type)
+        if isinstance(pred, BoundUnaryPredicate):
+            return pred.as_unbound(Reference(name))
+        elif isinstance(pred, BoundLiteralPredicate):
+            return _compute_coh(name, pred , transformer)
+        elif isinstance(pred, BoundSetPredicate):
+            return pred.as_unbound(Reference(name), pred.literals)
+        else:
+            return None
+
+    def pyarrow_transform(self, source: IcebergType) -> "Callable[[pa.Array], pa.Array]":
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        return lambda v: pc.multiply(v, 10).cast(pa.int32(),safe=False)
+
+    @property
+    def preserves_order(self) -> bool:
+        return False
+
+    @property
+    def supports_pyarrow_transform(self) -> bool:
+        return True
